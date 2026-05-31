@@ -54,7 +54,8 @@ enum tftp_opcode
   (_sa).sin_port = htons((_c)->port);
 
 /**
- * @brief Opens a new TFTP connection to a remote server.
+ * @brief Opens a new TFTP connection to a remote server. Thus must be passed to tftpc_close when you're done.
+ * Part of the @b PUBLIC API.
  * @param addr IP address of the server, possibly including port name.
  *   The IP address must be resolved before calling this.
  * @returns New TFTP client context, or NULL on failure.
@@ -93,6 +94,7 @@ tftpc_open(const char* addr)
 
 /**
  * @brief Closes a TFTP connection to a server, and frees it.
+ * Part of the @b PUBLIC API.
  * @param c Context to be closed and freed. May be null.
  */
 static void
@@ -103,7 +105,7 @@ tftpc_close(struct tftpc* c)
   close(c->fd);
 }
 
-static int
+static inline int
 tftpc__putstr(uint8_t** p, uint8_t* end, const char* str)
 {
   const size_t sl = strlen(str);
@@ -114,7 +116,7 @@ tftpc__putstr(uint8_t** p, uint8_t* end, const char* str)
   return 0;
 }
 
-static int
+static inline int
 tftpc__puts(uint8_t** p, uint8_t* end, uint16_t n)
 {
   if ((*p) + 2 > end)
@@ -124,7 +126,7 @@ tftpc__puts(uint8_t** p, uint8_t* end, uint16_t n)
   return 0;
 }
 
-static int
+static inline int
 tftpc__putbuf(uint8_t** p, uint8_t* end, const void* buf, size_t l)
 {
   if ((*p) + l > end)
@@ -291,7 +293,13 @@ tftpc__geterr(const void* packet)
 }
 
 /**
- * Perform a TFTP PUT to a remote file
+ * @brief Perform a TFTP PUT to a remote file
+ * Part of the @b PUBLIC API.
+ * @param c Client context
+ * @param file Name of the file on the remote server to PUT to
+ * @param data Buffer containing the data you wish to send
+ * @param size Size of the data in buffer
+ * @returns 0 on success, negative error code on failure
  */
 static int
 tftpc_put(struct tftpc* c, const char* file, const void* data, size_t size)
@@ -412,11 +420,12 @@ tftpc__send_ack(struct tftpc* c, uint16_t block)
 }
 
 /**
- * @brief Performs a TFTP get operation into memory
+ * @brief Performs a TFTP get operation into memory.
+ * Part of the @b PUBLIC API.
  * @param c Context
  * @param file File
- * @param data Pointer to a void* to hold data
- * @param size Pointer to a variable to hold the resulting data size
+ * @param data Pointer to a void* to hold data. Must not be NULL.
+ * @param size Pointer to a variable to hold the resulting data size. Must not be NULL.
  */
 static int
 tftpc_get(struct tftpc* c, const char* file, void** data, size_t* size)
