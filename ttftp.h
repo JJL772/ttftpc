@@ -149,7 +149,7 @@ tftpc__gets(const void* packet, int off)
 static inline int
 tftpc__is_loopback(struct in_addr a)
 {
-  return a.s_addr == 0 || a.s_addr == 0x7F000001;
+  return a.s_addr == 0 || a.s_addr == htonl(0x7F000001);
 }
 
 /**
