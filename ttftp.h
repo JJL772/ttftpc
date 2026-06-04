@@ -170,6 +170,8 @@ tftpc__match_addr(const struct sockaddr_in a, const struct sockaddr_in b)
 static int
 tftpc__do_data(struct tftpc* c, uint16_t block, const void* data, size_t ds)
 {
+  struct sockaddr_in sa;
+  socklen_t sl;
   ssize_t nr;
   int retries = 10;
 
@@ -189,7 +191,7 @@ tftpc__do_data(struct tftpc* c, uint16_t block, const void* data, size_t ds)
   tftpc__putbuf(&p, end, data, ds);
 
 sendagain:
-  struct sockaddr_in sa = c->fromaddr;
+  sa = c->fromaddr;
 
   nr = sendto(c->fd, packet, p - packet, 0, (struct sockaddr*)&sa, sizeof(sa));
   if (nr < 0) {
@@ -199,7 +201,7 @@ sendagain:
 recvagain:
 
   /* we expect an ACK now */
-  socklen_t sl = sizeof(struct sockaddr_in);
+  sl = sizeof(struct sockaddr_in);
   nr = recvfrom(c->fd, packet, sizeof(packet), 0, (struct sockaddr*)&sa, &sl);
   if (nr < 0) {
     if (errno == ETIMEDOUT && --retries >= 0)
@@ -238,7 +240,6 @@ static int
 tftpc__xrq(struct tftpc* c, const char* file, uint16_t type)
 {
   ssize_t nr;
-  uint16_t block = 1, op;
   uint8_t packet[512];
   uint8_t* p = packet, *end = packet + sizeof(packet);
 
@@ -304,10 +305,10 @@ tftpc__geterr(const void* packet)
 static int
 tftpc_put(struct tftpc* c, const char* file, const void* data, size_t size)
 {
+  struct sockaddr_in sa;
   ssize_t nr;
   uint16_t block = 1, op;
   uint8_t packet[512];
-  uint8_t* p = packet, *end = packet + sizeof(packet);
 
   /* send initial write request */
   nr = tftpc__xrq(c, file, TFTP_WRQ);
@@ -315,7 +316,7 @@ tftpc_put(struct tftpc* c, const char* file, const void* data, size_t size)
     return nr;
 
 recvagain:
-  struct sockaddr_in sa = c->fromaddr;
+  sa = c->fromaddr;
   socklen_t sl = sizeof(c->fromaddr);
 
   nr = recvfrom(c->fd, packet, sizeof(packet), 0, (struct sockaddr*)&sa, &sl);
@@ -352,12 +353,13 @@ recvagain:
 static int
 tftpc__recv_data(struct tftpc* c, uint16_t block, void* buffer)
 {
+  struct sockaddr_in sa;
   ssize_t nr;
   uint8_t packet[512 + 4];
   uint16_t op;
 
 recvagain:
-  struct sockaddr_in sa = c->fromaddr;
+  sa = c->fromaddr;
   socklen_t sl = sizeof(c->fromaddr);
 
   nr = recvfrom(c->fd, packet, sizeof(packet), 0, (struct sockaddr*)&sa, &sl);
@@ -430,10 +432,8 @@ tftpc__send_ack(struct tftpc* c, uint16_t block)
 static int
 tftpc_get(struct tftpc* c, const char* file, void** data, size_t* size)
 {
-  ssize_t nr, off = 0, err = 0;
-  uint16_t block = 1, op;
-  uint8_t packet[512];
-  uint8_t* p = packet, *end = packet + sizeof(packet);
+  ssize_t nr, err = 0;
+  uint16_t block = 1;
 
   assert(data);
   assert(size);
