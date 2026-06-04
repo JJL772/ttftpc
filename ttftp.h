@@ -443,7 +443,7 @@ tftpc_get(struct tftpc* c, const char* file, void** data, size_t* size)
     return nr;
 
   /* preallocate space for 64 blocks (32K) */
-  *data = malloc(512 * 64);
+  *data = calloc(1, 512 * 64);
   *size = 512 * 64;
 
   uint8_t* dp = (uint8_t*)*data;
@@ -472,6 +472,7 @@ recv_data:
       *size += 64 * 512;
       *data = realloc(*data, *size);
       dp = (uint8_t*)*data + oldpos;
+      memset(dp, 0, *size - (dp - (uint8_t*)*data)); /* clear until end */
     }
 
     /* ack the block */
