@@ -34,9 +34,12 @@ struct tftpc
   int port;
   struct in_addr addr;
   int fd;
-  int retries;
-  
   struct sockaddr_in fromaddr;
+  
+  /* The following items may be set by the user as desired, after context
+   * creation. */
+  int retries;
+  int log_level;
 };
 
 enum tftp_opcode
@@ -48,10 +51,26 @@ enum tftp_opcode
   TFTP_ERROR = 0x5,
 };
 
-#define TFTPC__SOCKADDR(_c, _sa) \
-  (_sa).sin_addr = (_c)->addr; \
-  (_sa).sin_family = AF_INET; \
+enum tftp_log_level
+{
+  TFTP_LOG_NONE,  /* default */
+  TFTP_LOG_ERROR, /* Print errors (i.e. retries) */
+  TFTP_LOG_DEBUG, /* Debug logging */
+};
+
+#define TFTPC__SOCKADDR(_c, _sa)      \
+  (_sa).sin_addr = (_c)->addr;        \
+  (_sa).sin_family = AF_INET;         \
   (_sa).sin_port = htons((_c)->port);
+
+#define TFTPC__LOG(_c, _level, ...)       \
+  do {                                    \
+  if ((_c)->log_level >= (_level))        \
+    printf(__VA_ARGS__);                  \
+  } while(0)
+
+#define TFTPC__DBG(_c, ...) TFTPC__LOG((_c), TFTP_LOG_DEBUG, __VA_ARGS__)
+#define TFTPC__ERR(_c, ...) TFTPC__LOG((_c), TFTP_LOG_ERROR, __VA_ARGS__)
 
 /**
  * @brief Opens a new TFTP connection to a remote server. Thus must be passed to tftpc_close when you're done.
@@ -83,7 +102,18 @@ tftpc_open(const char* addr)
     perror("socket");
     return NULL;
   }
-  
+
+  const struct timeval tv = {
+    .tv_sec = 1,
+    .tv_usec = 0,
+  };
+
+  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+    perror("setsockopt(SO_RCVTIMEO)");
+    close(fd);
+    return NULL;
+  }
+
   struct tftpc* tc = (struct tftpc*)calloc(1, sizeof(struct tftpc));
   tc->fd = fd;
   tc->addr.s_addr = inet_addr(addr);
@@ -173,7 +203,7 @@ tftpc__do_data(struct tftpc* c, uint16_t block, const void* data, size_t ds)
   struct sockaddr_in sa;
   socklen_t sl;
   ssize_t nr;
-  int retries = 10;
+  int retries = c->retries;
 
   /* max payload will always be 512 bytes */
   if (ds > 512)
@@ -193,6 +223,11 @@ tftpc__do_data(struct tftpc* c, uint16_t block, const void* data, size_t ds)
 sendagain:
   sa = c->fromaddr;
 
+  TFTPC__DBG(
+    c, "tftpc__do_data: sendto: %s:%d",
+    inet_ntoa(sa.sin_addr), ntohs(sa.sin_port)
+  );
+
   nr = sendto(c->fd, packet, p - packet, 0, (struct sockaddr*)&sa, sizeof(sa));
   if (nr < 0) {
     return -errno;
@@ -200,12 +235,20 @@ sendagain:
 
 recvagain:
 
+  TFTPC__DBG(
+    c, "tftpc__do_data: recvfrom: %s:%d",
+    inet_ntoa(sa.sin_addr), ntohs(sa.sin_port)
+  );
+
   /* we expect an ACK now */
   sl = sizeof(struct sockaddr_in);
   nr = recvfrom(c->fd, packet, sizeof(packet), 0, (struct sockaddr*)&sa, &sl);
   if (nr < 0) {
-    if (errno == ETIMEDOUT && --retries >= 0)
+    if (errno == ETIMEDOUT && --retries >= 0) {
+      TFTPC__DBG(c, "tftpc__do_data: retry %d/%d\n", retries, c->retries);
       goto sendagain;
+    }
+    TFTPC__DBG(c, "tftpc_put: recvfrom: %s\n", strerror(errno));
     return -errno;
   }
 
@@ -232,6 +275,8 @@ recvagain:
       return -ETIMEDOUT;
     goto sendagain;
   }
+
+  retries = c->retries;
 
   return 0;
 }
@@ -309,7 +354,9 @@ tftpc_put(struct tftpc* c, const char* file, const void* data, size_t size)
   ssize_t nr;
   uint16_t block = 1, op;
   uint8_t packet[512];
+  int retries = c->retries;
 
+sendagain:
   /* send initial write request */
   nr = tftpc__xrq(c, file, TFTP_WRQ);
   if (nr < 0)
@@ -320,9 +367,17 @@ recvagain:
   socklen_t sl = sizeof(c->fromaddr);
 
   nr = recvfrom(c->fd, packet, sizeof(packet), 0, (struct sockaddr*)&sa, &sl);
-  if (nr < 0)
+  if (nr < 0) {
+    if (errno == ETIMEDOUT && --retries >= 0) {
+      TFTPC__DBG(c, "tftpc_put: recv retry %d/%d\n", retries, c->retries);
+      goto sendagain;
+    }
+    TFTPC__DBG(c, "tftpc_put: recvfrom: %s\n", strerror(errno));
     return -errno;
-    
+  }
+
+  retries = c->retries;
+
   /* reject bogus hosts */
   if (!tftpc__match_addr(sa, c->fromaddr))
     goto recvagain;
@@ -330,10 +385,11 @@ recvagain:
 
   /* Expect either error or ACK */
   op = tftpc__gets(packet, 0);
-  if (op == TFTP_ERROR)
+  if (op == TFTP_ERROR) {
     return -tftpc__geterr(packet);
-  else if(op != TFTP_ACK)
+  } else if(op != TFTP_ACK) {
     return -EPROTO;
+  }
 
   const uint8_t* ptr = (const uint8_t*)data;
   while (size > 0) {
@@ -361,6 +417,11 @@ tftpc__recv_data(struct tftpc* c, uint16_t block, void* buffer)
 recvagain:
   sa = c->fromaddr;
   socklen_t sl = sizeof(c->fromaddr);
+
+  TFTPC__DBG(
+    c, "tftpc__recv_data: recvfrom: %s:%d\n",
+    inet_ntoa(sa.sin_addr), ntohs(sa.sin_port)
+  );
 
   nr = recvfrom(c->fd, packet, sizeof(packet), 0, (struct sockaddr*)&sa, &sl);
   if (nr < 0)
@@ -392,6 +453,8 @@ recvagain:
 
   /* copy into out buffer */
   memcpy(buffer, packet + 4, nr - 4);
+
+  TFTPC__DBG(c, "tftpc__recv_data: recv'ed %d bytes in block %d\n", (int)nr-4, block);
 
   return nr - 4;
 }
@@ -447,13 +510,15 @@ tftpc_get(struct tftpc* c, const char* file, void** data, size_t* size)
   *size = 512 * 64;
 
   uint8_t* dp = (uint8_t*)*data;
+  int retries = c->retries;
   do {
 recv_data:
     nr = tftpc__recv_data(c, block, dp);
 
     /* if -EAGAIN, send ack for previous block, again */
-    if (nr == -EAGAIN) {
-      printf("ACKing block %d again\n", block-1);
+    if (nr == -EAGAIN || nr == -ETIMEDOUT) {
+      TFTPC__DBG(c, "tftpc_get: ACK block %d retry %d/%d\n", block,
+        retries, c->retries);
       if ((err = tftpc__send_ack(c, block-1)) < 0) {
         goto fail;
       }
@@ -462,6 +527,8 @@ recv_data:
       err = nr;
       goto fail;
     }
+
+    retries = c->retries;
 
     /* adjust offset */
     dp += nr;
