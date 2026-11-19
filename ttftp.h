@@ -484,32 +484,39 @@ tftpc__send_ack(struct tftpc* c, uint16_t block)
   return 0;
 }
 
+/* Callback for tftpc_get_cb */
+typedef void(*tftpc_get_cb_t)(void* data, size_t blsize, uint16_t block);
+
 /**
  * @brief Performs a TFTP get operation into memory.
  * Part of the @b PUBLIC API.
  * @param c Context
  * @param file File
- * @param data Pointer to a void* to hold data. Must not be NULL.
- * @param size Pointer to a variable to hold the resulting data size. Must not be NULL.
+ * @param data Pointer to a void* to hold data. Must not be NULL if size is not NULL.
+ * @param size Pointer to a variable to hold the resulting data size. Must not be NULL if data is not NULL.
+ * @param cb Callback to be invoked after each block is fetched.
  */
 static int
-tftpc_get(struct tftpc* c, const char* file, void** data, size_t* size)
+tftpc_get_cb(struct tftpc* c, const char* file, void** data, size_t* size, tftpc_get_cb_t cb)
 {
   ssize_t nr, err = 0;
   uint16_t block = 1;
 
-  assert(data);
-  assert(size);
+  assert((data && size) || (!data && !size));
 
   /* send read-request */
   if ((nr = tftpc__xrq(c, file, TFTP_RRQ)) < 0)
     return nr;
 
   /* preallocate space for 64 blocks (32K) */
-  *data = calloc(1, 512 * 64);
-  *size = 512 * 64;
+  if (data && size) {
+    *data = calloc(1, 512 * 64);
+    *size = 512 * 64;
+  }
 
-  uint8_t* dp = (uint8_t*)*data;
+  uint8_t datablock[512];
+  uint8_t* dp = data ? (uint8_t*)*data : datablock;
+
   int retries = c->retries;
   do {
 recv_data:
@@ -530,16 +537,23 @@ recv_data:
 
     retries = c->retries;
 
-    /* adjust offset */
-    dp += nr;
-
     /* resize buffer if needed */
-    if (dp - (uint8_t*)*data >= *size - 512) {
-      ssize_t oldpos = dp - (uint8_t*)(*data);
-      *size += 64 * 512;
-      *data = realloc(*data, *size);
-      dp = (uint8_t*)*data + oldpos;
-      memset(dp, 0, *size - (dp - (uint8_t*)*data)); /* clear until end */
+    if (size && data) {
+      /* adjust offset. dp will remain the same for case where data is ignored. */
+      dp += nr;
+
+      if (dp - (uint8_t*)*data >= *size - 512) {
+        ssize_t oldpos = dp - (uint8_t*)(*data);
+        *size += 64 * 512;
+        *data = realloc(*data, *size);
+        dp = (uint8_t*)*data + oldpos;
+        memset(dp, 0, *size - (dp - (uint8_t*)*data)); /* clear until end */
+      }
+    }
+
+    /* exec callback, if any */
+    if (cb) {
+      cb(dp, nr, block);
     }
 
     /* ack the block */
@@ -557,6 +571,21 @@ fail:
   free(*data);
   *size = 0;
   return err;
+}
+
+
+/**
+ * @brief Performs a TFTP get operation into memory.
+ * Part of the @b PUBLIC API.
+ * @param c Context
+ * @param file File
+ * @param data Pointer to a void* to hold data. Must not be NULL.
+ * @param size Pointer to a variable to hold the resulting data size. Must not be NULL.
+ */
+static int
+tftpc_get(struct tftpc* c, const char* file, void** data, size_t* size)
+{
+  return tftpc_get_cb(c, file, data, size, NULL);
 }
 
 #ifdef __cplusplus
