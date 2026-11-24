@@ -29,6 +29,10 @@
 extern "C" {
 #endif
 
+#define TFTPC__TIMEOUT(_errno)                                              \
+  ((_errno) == EAGAIN || (_errno) == EWOULDBLOCK || (_errno) == EINPROGRESS \
+    || (_errno) == ETIMEDOUT)
+
 struct tftpc
 {
   int port;
@@ -244,10 +248,13 @@ recvagain:
   sl = sizeof(struct sockaddr_in);
   nr = recvfrom(c->fd, packet, sizeof(packet), 0, (struct sockaddr*)&sa, &sl);
   if (nr < 0) {
-    if (errno == ETIMEDOUT && --retries >= 0) {
+    if (TFTPC__TIMEOUT(errno) && --retries >= 0) {
       TFTPC__DBG(c, "tftpc__do_data: retry %d/%d\n", retries, c->retries);
       goto sendagain;
+    } else if (errno == EINTR) {
+      goto sendagain; /* not a retry. */
     }
+
     TFTPC__DBG(c, "tftpc_put: recvfrom: %s\n", strerror(errno));
     return -errno;
   }
@@ -368,9 +375,11 @@ recvagain:
 
   nr = recvfrom(c->fd, packet, sizeof(packet), 0, (struct sockaddr*)&sa, &sl);
   if (nr < 0) {
-    if (errno == ETIMEDOUT && --retries >= 0) {
+    if (TFTPC__TIMEOUT(errno) && --retries >= 0) {
       TFTPC__DBG(c, "tftpc_put: recv retry %d/%d\n", retries, c->retries);
       goto sendagain;
+    } else if (errno == EINTR) {
+      goto sendagain; /* this doesn't constitute a retry, yet */
     }
     TFTPC__DBG(c, "tftpc_put: recvfrom: %s\n", strerror(errno));
     return -errno;
@@ -403,7 +412,8 @@ recvagain:
 }
 
 /**
- * @brief Recv data, write data into buffer
+ * @brief Recv data, write data into buffer.
+ * Handles the EINTR case for you.
  * @returns Returns number of bytes written to buf, or negative error code.
  */
 static int
@@ -424,8 +434,12 @@ recvagain:
   );
 
   nr = recvfrom(c->fd, packet, sizeof(packet), 0, (struct sockaddr*)&sa, &sl);
-  if (nr < 0)
+  if (nr < 0) {
+    if (errno == EINTR) {
+      goto recvagain;
+    }
     return -errno;
+  }
 
   /* reject bogus hosts */
   if (!tftpc__match_addr(sa, c->fromaddr))
@@ -522,8 +536,8 @@ tftpc_get_cb(struct tftpc* c, const char* file, void** data, size_t* size, tftpc
 recv_data:
     nr = tftpc__recv_data(c, block, dp);
 
-    /* if -EAGAIN, send ack for previous block, again */
-    if (nr == -EAGAIN || nr == -ETIMEDOUT) {
+    /* if we timeout send ack for previous block, again */
+    if (TFTPC__TIMEOUT(-nr) && --retries >= 0) {
       TFTPC__DBG(c, "tftpc_get: ACK block %d retry %d/%d\n", block,
         retries, c->retries);
       if ((err = tftpc__send_ack(c, block-1)) < 0) {
